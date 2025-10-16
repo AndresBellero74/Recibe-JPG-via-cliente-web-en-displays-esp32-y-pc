@@ -1,0 +1,119 @@
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <FS.h>
+#include <SPIFFS.h>
+#include <TJpg_Decoder.h>
+#include <Arduino_GFX_Library.h>
+
+// 📶 Wi-Fi
+const char* ssid = "Nombre wifi";
+const char* password = "Clave wifi";
+
+// 🌐 URL de la imagen
+const char* image_url = "http://192.168.0.250/photo.jpg";
+const char* image_path = "/foto.jpg";
+
+// 🖥️ Configuración de pantalla para ESP32-2432S028 (SPI + ILI9341)
+#define TFT_BL 21  // Retroiluminación
+Arduino_DataBus *bus = new Arduino_ESP32SPI(
+  2 /* DC */, 15 /* CS */, 14 /* SCK */, 13 /* MOSI */, GFX_NOT_DEFINED /* MISO */
+);
+
+Arduino_GFX *gfx = new Arduino_ILI9341(bus, GFX_NOT_DEFINED /* RST */, 1 /* rotation */, true /* IPS */);
+
+// 🔧 Callback para TJpg_Decoder
+/*bool tft_output(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t *bitmap) {
+  gfx->draw16bitRGBBitmap(x, y, bitmap, w, h);
+  return true;
+}*/
+bool tft_output(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t *bitmap) {
+  for (int i = 0; i < w * h; i++) {
+    uint16_t color = bitmap[i];
+    // Invertir R y B (RGB565 → BGR565)
+    uint16_t r = (color & 0xF800) >> 11;
+    uint16_t g = (color & 0x07E0);
+    uint16_t b = (color & 0x001F) << 11;
+    bitmap[i] = b | g | r;
+  }
+  gfx->draw16bitRGBBitmap(x, y, bitmap, w, h);
+  return true;
+}
+
+void descargarImagen(const char* url, const char* path) {
+  HTTPClient http;
+  http.begin(url);
+  int httpCode = http.GET();
+
+  if (httpCode == 200) {
+    File file = SPIFFS.open(path, FILE_WRITE);
+    if (!file) {
+      Serial.println("❌ No se pudo abrir archivo en SPIFFS");
+      http.end();
+      return;
+    }
+
+    WiFiClient* stream = http.getStreamPtr();
+    uint8_t buffer[128];
+    int total = 0;
+
+    while (http.connected()) {
+      size_t available = stream->available();
+      if (available) {
+        int readLen = stream->readBytes(buffer, min(available, sizeof(buffer)));
+        file.write(buffer, readLen);
+        total += readLen;
+      }
+    }
+
+    file.close();
+    Serial.printf("✅ Imagen guardada (%d bytes)\n", total);
+  } else {
+    Serial.println("❌ Error HTTP: " + String(httpCode));
+  }
+
+  http.end();
+}
+
+void mostrarImagen(const char* path) {
+  if (TJpgDec.drawFsJpg(0, 0, path, SPIFFS)) {
+    Serial.println("🖼 Imagen mostrada correctamente con TJpg_Decoder");
+  } else {
+    Serial.println("❌ Error al decodificar JPEG con TJpg_Decoder");
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  // 🧠 Inicializar SPIFFS
+  if (!SPIFFS.begin(true)) {
+    Serial.println("❌ Error al montar SPIFFS");
+    return;
+  }
+
+  // 🖥️ Inicializar pantalla
+  gfx->begin();
+  gfx->fillScreen(BLACK);
+#ifdef TFT_BL
+  pinMode(TFT_BL, OUTPUT);
+  digitalWrite(TFT_BL, HIGH);
+#endif
+
+  // 📶 Conectar Wi-Fi
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\n✅ Conectado a Wi-Fi");
+
+  // 🔧 Configurar TJpg_Decoder
+  TJpgDec.setJpgScale(1);  // sin escalado
+  TJpgDec.setCallback(tft_output);
+}
+
+void loop() {
+  descargarImagen(image_url, image_path);
+  mostrarImagen(image_path);
+  delay(3000);  // refresca cada 3 segundos
+}
